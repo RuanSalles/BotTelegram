@@ -4,6 +4,7 @@ namespace App\Console\Commands;
 
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\Http;
+use App\Telegram\Services\CommandBus;
 
 class TelegramPolling extends Command
 {
@@ -13,59 +14,54 @@ class TelegramPolling extends Command
     public function handle()
     {
         $token = config('services.telegram.token');
+
         $offset = cache()->get('telegram_offset', 0);
 
-        $this->info('🤖 Telegram polling iniciado...');
+        $this->info("🤖 Telegram bot iniciado...");
 
         while (true) {
-            $response = Http::get("https://api.telegram.org/bot{$token}/getUpdates", [
-                'offset' => $offset,
-                'timeout' => 30,
-            ]);
 
-            $updates = $response->json()['result'] ?? [];
+            try {
+                $response = Http::timeout(30)
+                    ->get("https://api.telegram.org/bot{$token}/getUpdates", [
+                        'offset' => $offset,
+                        'timeout' => 25,
+                    ]);
 
-            foreach ($updates as $update) {
-                $offset = $update['update_id'] + 1;
-
-                $message = $update['message']['text'] ?? null;
-                $chatId = $update['message']['chat']['id'] ?? null;
-
-                if (!$message || !$chatId) {
+                if ($response->failed()) {
+                    $this->warn("Falha ao buscar updates");
+                    sleep(2);
                     continue;
                 }
 
-                $this->info("Mensagem: {$message}");
+                $updates = $response->json('result') ?? [];
 
-                switch (true) {
+                $bus = app(CommandBus::class);
 
-                    case $message === '/start':
-                        $this->sendMessage($token, $chatId, "👋 Bem-vindo!\nDigite /help para ver os comandos.");
-                        break;
+                foreach ($updates as $update) {
 
-                    case $message === '/help':
-                        $this->sendMessage($token, $chatId, "📚 Comandos disponíveis:\n/start\n/help\n/lesson");
-                        break;
+                    $offset = $update['update_id'] + 1;
 
-                    case $message === '/lesson':
-                        $this->sendMessage($token, $chatId, "🇬🇧 Aula rápida:\n\n'Hello' = Olá\n\nRepita: Hello!");
-                        break;
+                    $message = $update['message']['text'] ?? null;
+                    $chatId = $update['message']['chat']['id'] ?? null;
 
-                    default:
-                        $this->sendMessage($token, $chatId, "❌ Não entendi.\nDigite /help.");
-                        break;
+                    if (!$message || !$chatId) {
+                        continue;
+                    }
+
+                    $this->info("📩 {$message}");
+
+                    $bus->handle($chatId, $message);
                 }
+
+                cache()->forever('telegram_offset', $offset);
+
+            } catch (\Throwable $e) {
+                $this->error("Erro: " . $e->getMessage());
+                sleep(3);
             }
 
             sleep(1);
         }
-    }
-
-    private function sendMessage($token, $chatId, $text)
-    {
-        Http::post("https://api.telegram.org/bot{$token}/sendMessage", [
-            'chat_id' => $chatId,
-            'text' => $text,
-        ]);
     }
 }
